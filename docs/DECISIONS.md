@@ -84,9 +84,9 @@
 
 **决策**：
 
-1. **宽度调节走既有 resizer 模式，不新增设置项**：固定态大纲右缘加拖拽手柄（`.toc-resizer`，样式与 `.word-preview-resizer` 同构），宽度经 `--toc-width` CSS 变量驱动 `.floating-toc.pinned`（`width: var(--toc-width, 260px)`），JS 拖拽逻辑复制右侧预览 resizer 的 pointer capture 模式。上下限 200px（沿用 CSS min-width）~ `min(480px, 容器 40%)`（对齐 CSS max-width 40vw 精神），双击恢复 260px。宽度为会话内状态（useState），**不持久化**——与 `rightPanelWidth` 行为一致，克制不加表面。
+1. **宽度调节走既有 resizer 模式，不新增设置项**：固定态大纲右缘加拖拽手柄（`.toc-resizer`，样式与 `.word-preview-resizer` 同构），宽度经 `--toc-width` CSS 变量驱动 `.floating-toc.pinned`（`width: var(--toc-width, 260px)`），JS 拖拽逻辑复制右侧预览 resizer 的 pointer capture 模式。上下限 200px（沿用 CSS min-width）~ `min(480px, 容器 40%)`（对齐 CSS max-width 40vw 精神），双击恢复 260px。宽度为会话内状态（useState），**不持久化**——与 `rightPanelWidth` 行为一致，克制不加表面。两个 resizer 的拖拽态用 `resizingPanel: 'toc' | 'right' | null` 判别联合而非共用布尔：`main-content.is-resizing` 仍统一管 user-select，但 `dragging` 高亮各手柄独立判定，避免右栏与大纲并存时拖一个另一个也高亮。
 2. **开关迁移而非删除**：`tocAlwaysPinned` 设置字段与 `settingsService` schema 不动（既有迁移逻辑零改动）；仅移除面板内 `floating-toc-preference` 按钮及其 CSS 块（含 `.floating-toc-switch`），在「设置 → 外观」分区新增同名 toggle-switch 行（`aria-label`/`aria-pressed` 齐备）。AppLayout 经 `useSettings` 的 SETTINGS_CHANGED_EVENT 订阅天然响应式，无需新增桥接。
-3. **保留一处隐式联动**：固定态下点击「取消固定大纲」仍会顺带把 `tocAlwaysPinned` 写回 false（既有行为）——这不是偷偷回退用户设置，而是必须的：`tocPinned = sessionPinned || tocAlwaysPinned`，若不清偏好，取消固定按钮在 always-pinned 开启时完全失效。设置页关闭开关则立即解除当前文档固定（无会话保持缓冲），行为可预期。
+3. **关闭语义与固定来源无关**：`tocPinned = tocSessionPinned || settings.tocAlwaysPinned`，两条写入路径并存——固定态下点击「取消固定大纲」会顺带把 `tocAlwaysPinned` 写回 false（既有行为；若不清偏好，取消固定按钮在 always-pinned 开启时完全失效，属必要联动而非静默回退）；AppLayout 增加一条 effect，监听 `settings.tocAlwaysPinned` 变为 false 时同步清 `tocSessionPinned`。后者使「设置页关闭开关 → 当前文档立即取消固定」**无论固定来自偏好还是手工固定都成立**，与 CHANGELOG / DESIGN 记载一致、行为可预期；开启方向的钉回由 `||` 合成自然完成，无需额外代码。
 4. **FloatingToc 组件变纯**：移除 `alwaysPinned` / `onAlwaysPinnedChange` props，组件不再持有偏好语义，只负责展示与固定态切换。
 
 **影响**：DESIGN.md Floating TOC 段已同步改写；e2e「always-pinned」用例改为经设置页驱动并顺带覆盖拖拽/双击复位；未新增依赖。
