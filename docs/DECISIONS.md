@@ -78,6 +78,19 @@
 
 **验证**：strict 全量编译 167 文件 0 error;`npm test` 781/781;lint 0 error;`npm run build` 通过;`npm audit` 0 vulnerabilities。
 
+### [DEC-143] - 2026-09-06 - 固定大纲宽度可调节 + 「总是固定大纲」收敛到设置页（ISS-217）
+
+**背景**：用户反馈两点：①固定态大纲左栏宽度固定 260px 不可调，长标题条目换行局促；②「总是固定大纲」开关按钮出现在大纲面板头部下方，与固定/关闭按钮并列显得拥挤难看。前者是能力缺口，后者触碰 DESIGN.md「Floating TOC」一节明确记载的「『总是固定大纲』只在固定态左侧栏中出现」设计——按 CONTRIBUTING §5.3 在本条与 PR 中显式记录。
+
+**决策**：
+
+1. **宽度调节走既有 resizer 模式，不新增设置项**：固定态大纲右缘加拖拽手柄（`.toc-resizer`，样式与 `.word-preview-resizer` 同构），宽度经 `--toc-width` CSS 变量驱动 `.floating-toc.pinned`（`width: var(--toc-width, 260px)`），JS 拖拽逻辑复制右侧预览 resizer 的 pointer capture 模式。上下限 200px（沿用 CSS min-width）~ `min(480px, 容器 40%)`（对齐 CSS max-width 40vw 精神），双击恢复 260px。宽度为会话内状态（useState），**不持久化**——与 `rightPanelWidth` 行为一致，克制不加表面。
+2. **开关迁移而非删除**：`tocAlwaysPinned` 设置字段与 `settingsService` schema 不动（既有迁移逻辑零改动）；仅移除面板内 `floating-toc-preference` 按钮及其 CSS 块（含 `.floating-toc-switch`），在「设置 → 外观」分区新增同名 toggle-switch 行（`aria-label`/`aria-pressed` 齐备）。AppLayout 经 `useSettings` 的 SETTINGS_CHANGED_EVENT 订阅天然响应式，无需新增桥接。
+3. **保留一处隐式联动**：固定态下点击「取消固定大纲」仍会顺带把 `tocAlwaysPinned` 写回 false（既有行为）——这不是偷偷回退用户设置，而是必须的：`tocPinned = sessionPinned || tocAlwaysPinned`，若不清偏好，取消固定按钮在 always-pinned 开启时完全失效。设置页关闭开关则立即解除当前文档固定（无会话保持缓冲），行为可预期。
+4. **FloatingToc 组件变纯**：移除 `alwaysPinned` / `onAlwaysPinnedChange` props，组件不再持有偏好语义，只负责展示与固定态切换。
+
+**影响**：DESIGN.md Floating TOC 段已同步改写；e2e「always-pinned」用例改为经设置页驱动并顺带覆盖拖拽/双击复位；未新增依赖。
+
 ### [DEC-140] - 2026-08-16 - 转录工具生成的「目标含空格」图片不渲染：读盘装载层空格归一化（ISS-194）
 
 **背景**：用户打开听悟转录的课程文档（94 张 PPT 截图，路径形如 `![PPT 幻灯片 1](./260815 Agent + Skill：法律工作的AI变革-杨卫薪律师_slides/slide_001.webp)`，目录名含空格 / `+` / 全角冒号），图片全部不渲染、按原始语法文本显示。#128（DEC-138）已支持绝对路径图片，相对路径 + `convertFileSrc` + asset 协议链路均有单测，初步怀疑路径解析；实测排除——问题在 Markdown 解析层。

@@ -319,6 +319,8 @@ export function AppLayout() {
   const [sourceHeadingScrollRequest, setSourceHeadingScrollRequest] = useState<SourceHeadingScrollRequest>();
   const rightPanelMode = session.rightPanelMode;
   const [rightPanelWidth, setRightPanelWidth] = useState(460);
+  // 固定大纲左侧栏宽度（默认与 CSS .floating-toc.pinned 的 260px 一致）。
+  const [tocWidth, setTocWidth] = useState(260);
   const [resizing, setResizing] = useState(false);
   const [htmlPresentationVisible, setHtmlPresentationVisible] = useState(false);
   const [htmlTableViewer, setHtmlTableViewer] = useState<{ block: HtmlTableBlock } | null>(null);
@@ -702,6 +704,38 @@ export function AppLayout() {
       const maxWidth = Math.min(760, Math.round(rect.width * 0.62));
       const nextWidth = rect.right - clientX;
       setRightPanelWidth(Math.min(maxWidth, Math.max(360, nextWidth)));
+    };
+
+    updateWidth(event.clientX);
+
+    const handlePointerMove = (moveEvent: PointerEvent) => {
+      updateWidth(moveEvent.clientX);
+    };
+
+    const handlePointerUp = () => {
+      setResizing(false);
+      window.removeEventListener('pointermove', handlePointerMove);
+      window.removeEventListener('pointerup', handlePointerUp);
+    };
+
+    window.addEventListener('pointermove', handlePointerMove);
+    window.addEventListener('pointerup', handlePointerUp);
+  }, []);
+
+  // 固定大纲左栏宽度拖拽：大纲贴 main-content 左缘，向右拖增宽。
+  // 上下限与 .floating-toc.pinned 的 min-width/max-width 对齐（200px / 40%）。
+  const handleTocResizerPointerDown = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    const container = mainContentRef.current;
+    if (!container) return;
+
+    event.preventDefault();
+    setResizing(true);
+
+    const updateWidth = (clientX: number) => {
+      const rect = container.getBoundingClientRect();
+      const maxWidth = Math.min(480, Math.round(rect.width * 0.4));
+      const nextWidth = clientX - rect.left;
+      setTocWidth(Math.min(maxWidth, Math.max(200, nextWidth)));
     };
 
     updateWidth(event.clientX);
@@ -1325,13 +1359,6 @@ export function AppLayout() {
     }
   }, [settings.tocAlwaysPinned]);
 
-  const handleTocAlwaysPinnedChange = useCallback((nextAlwaysPinned: boolean) => {
-    if (!nextAlwaysPinned) {
-      setTocSessionPinned(true);
-    }
-    updateSettings({ tocAlwaysPinned: nextAlwaysPinned });
-  }, []);
-
   const handleHtmlTableView = useCallback((block: HtmlTableBlock) => {
     setHtmlTableViewer({ block });
   }, []);
@@ -1502,7 +1529,12 @@ export function AppLayout() {
       <div
         ref={mainContentRef}
         className={mainContentClassName}
-        style={{ '--right-panel-width': `${rightPanelWidth}px` } as React.CSSProperties}
+        style={
+          {
+            '--right-panel-width': `${rightPanelWidth}px`,
+            '--toc-width': `${tocWidth}px`,
+          } as React.CSSProperties
+        }
       >
         {session.showHomePage ? (
           <RecentFilesPage
@@ -1519,11 +1551,23 @@ export function AppLayout() {
               items={toc}
               activeIndex={activeTocIndex}
               pinned={tocPinned}
-              alwaysPinned={settings.tocAlwaysPinned}
               onPinnedChange={handleTocPinnedChange}
-              onAlwaysPinnedChange={handleTocAlwaysPinnedChange}
               onNavigate={handleTocNavigate}
             />
+            {tocPinned && (
+              <div
+                className={`toc-resizer ${resizing ? 'dragging' : ''}`}
+                role="separator"
+                aria-label={t('tocResizeLabel')}
+                aria-orientation="vertical"
+                aria-valuemin={200}
+                aria-valuemax={480}
+                aria-valuenow={Math.round(tocWidth)}
+                title={t('tocResizeTitle')}
+                onPointerDown={handleTocResizerPointerDown}
+                onDoubleClick={() => setTocWidth(260)}
+              />
+            )}
             {editorPane}
           </>
         )}
