@@ -34,6 +34,18 @@
 
 ### 缺陷类
 
+#### 🔲 ISS-217 远程图片在弱网/系统代理黑洞下静默挂起——无反馈、不自愈、无重试（2026-09-13 研究完成，待实施）
+
+- **发现（用户报告 + 真机取证）**：打开含 43 张腾讯云 COS webp 的 139KB 长文（养虾日记 Vol21）时图片全部不显示，IR 区呈现原始 markdown 语法。用户观察「超长文档易出现」。
+- **根因（已实锤，非 folia 渲染 bug）**：用户系统代理 PacketTun（127.0.0.1:1082，HTTP+HTTPS 系统代理）当时对 `cos.ap-shanghai.myqcloud.com` 转发黑洞。WKWebView 遵守系统代理 → 全部图片请求挂起 60s+ 后逐个失败（约每 10s 一张 trickle error）；终端 curl 不走系统代理故直连 0.4s 秒通，造成「链接有效但软件不显示」的假象。对照证据：`curl -x 127.0.0.1:1082` = HTTP 000 超时；直连 = 200。CSP(img-src https:)/ATS/localImageResolver(https 跳过)/sanitize(DOMPurify 保留 img) 四层静态全排除。
+- **folia 侧真实体验缺陷（本卡范围）**：
+  1. 请求挂起期间（最长 60s+）**零反馈**——无 error 事件 → ISS-208 图片诊断 banner 不触发；IR 直接显示原始语法；
+  2. **不自愈**：代理恢复后挂起的 img 永不重试，必须整页 reload（真机实验：t=25s 手动 eager+换 bust src 可恢复，证明只是缺重试机制）；
+  3. 43 张图同时发起，全部排在死代理后串行超时，放大故障时长。
+- **取证方法（复用价值）**：vite dev 中间件（`POST /__folio-diag` → jsonl）作为 WKWebView 无 CDP 时的 DOM/网络态磁盘通道 + cache-bust（URL `?fb=N`）绕 WebKit 磁盘缓存制造可复现冷开。证据存档 `/tmp/folia-diag-evidence.jsonl`（临时，关键结论已记录本卡）。
+- **建议方案（待用户确认范围后 Issue → PR）**：A. 图片懒加载/滚动按需加载（减少首开并发放大效应）；B. 挂起超时占位 + 失败可见 + 单图重试/批量重试（对冲代理恢复场景）。A+B 均为编辑器层改动，预计 L2。
+- **用户侧即时缓解（非代码）**：PacketTun 给 `*.myqcloud.com` 配直连规则或临时关闭系统代理。
+
 #### ✅ ISS-197 fs 插件 deny-only scope + write_managed_asset 强制约束（已 PR #135，2026-08-29 squash merge 5c97cd1；对抗式 review 设计确认正确、0 阻塞；LOW 加固项并入 ISS-201、deny 大小写真机验证移交 NOT_VERIFIED）
 
 - **发现:** Tauri v2 ACL「allow 列表为空 = 放行一切」,capabilities 4 条 fs:allow-* 无 scope 约束,lib.rs 自定义命令的白名单/黑名单可被 `invoke('plugin:fs|read_file',…)` 直接绕过。
