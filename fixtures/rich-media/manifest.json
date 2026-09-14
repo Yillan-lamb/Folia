@@ -132,6 +132,20 @@
       "expectedDiagnostics": ["blocked-scheme"]
     },
     {
+      "id": "remote-image-hang",
+      "file": "remote-image-hang.md",
+      "scenario": "resource-resolve",
+      "kind": "image",
+      "blocks": ["img:https-hang-route"],
+      "asserts": [
+        "e2e route 黑洞模拟挂起：~40s 内 timeout 占位出现",
+        "单条重试(同URL)后新请求放行→加载成功、条目清除",
+        "远程 img 带 loading=lazy、data URI 不带",
+        "输入 round-trip 后源码不含 loading=（ISS-217）"
+      ],
+      "expectedDiagnostics": ["timeout"]
+    },
+    {
       "id": "https-image",
       "file": "https-image.md",
       "scenario": "resource-resolve",

@@ -11,6 +11,11 @@ import {
 import { useSettings } from '../hooks/useSettings';
 import { translate } from '../services/i18n';
 import { resolveLocalImages } from '../services/localImageResolver';
+import {
+  applyLazyLoadingToRemoteImages,
+  retryRemoteImageByUrl,
+  watchRemoteImages,
+} from '../services/remoteImageLoadService';
 import { openExternalUrl } from '../services/urlOpener';
 import { repairSplitWrapperHtmlIrPreviews, repairSvgIrPreviewsFromMarkdown, sanitizeVditorIrHtml } from '../services/vditorIrSanitizeService';
 import { useImageAssetStore } from '../context/useImageAssetStore';
@@ -37,6 +42,24 @@ const FOLIA_TRIGGER_ATTR = 'data-folia-viewer-bound';
 const ICON_SIZE = 14;
 const ICON_STROKE_WIDTH = 1.6;
 const LOCAL_MEDIA_NODE_SELECTOR = 'img, source[src], source[srcset], video[poster], [style*="url("], style';
+// ISS-217：banner 最多渲染的图片诊断明细条数。代理黑洞场景 43 张图同时
+// 挂起会把 80px/条的占位堆成 3000px+ 的墙，截断为 3 条 + 汇总行。
+const MAX_VISIBLE_IMAGE_DIAGNOSTICS = 3;
+// 可重试的图片诊断码（远程地址才有重试按钮；本地相对路径的负缓存重试
+// 是另一条通路，不在 ISS-217 范围）。
+const RETRYABLE_IMAGE_DIAGNOSTIC_CODES = new Set<RenderDiagnostic['code']>([
+  'timeout',
+  'not-found',
+  'decode-failed',
+]);
+
+function isRetryableImageDiagnostic(diagnostic: RenderDiagnostic): boolean {
+  return (
+    diagnostic.src !== undefined &&
+    RETRYABLE_IMAGE_DIAGNOSTIC_CODES.has(diagnostic.code) &&
+    /^(https?:)?\/\//i.test(diagnostic.src)
+  );
+}
 
 type EditorPhase = 'loading' | 'ready' | 'error';
 
@@ -795,6 +818,14 @@ export function WysiwygEditorPane({ source, onChange, onViewComplexTable, filePa
   // 聚合失败的资源为 RenderDiagnostic[]，渲染在编辑器上方的 banner
   // （不在 IR DOM 内，避免 caret / focus 风险）。onload 也收集以便
   // 用户后续可点击「详情」查看 imageDiagnostics。
+  //
+  // ISS-217 扩展：① 挂起看门狗——代理黑洞等场景下 img 请求挂起 60s+
+  // 期间没有任何 error 事件，banner 原本不会触发；watchRemoteImages 对
+  // 「已发起请求且迟迟未完成」的远程图片按 30s 超时上报（走与 error 完全
+  // 相同的 reportDiagnostic 记账路径，后续真实 error 到达时按 src 替换
+  // 升级消息、load 到达时清除）。② deps 从 [] 收紧为 [filePath, retryKey]，
+  // 文档切换 / 编辑器重建时重置聚合，防止指向已销毁 img 的陈旧条目残留
+  // （重试按钮变死按钮）。
   useEffect(() => {
     const host = hostRef.current;
     if (!host) return undefined;
@@ -807,9 +838,49 @@ export function WysiwygEditorPane({ source, onChange, onViewComplexTable, filePa
     // 仅作重建节点跨元素兜底。
     const diagByElement = new WeakMap<HTMLImageElement, RenderDiagnostic>();
     const diagBySrc = new Map<string, RenderDiagnostic>();
+    setImageDiagnostics([]);
+
+    // ISS-217：error 与 timeout 两条来源共用的插入/替换记账——元素身份
+    // 优先于 src 匹配（重试会把同一元素的 src 改成 ?folioRetry=N 唯一
+    // URL，后续 error 携带新 src，按元素才能升级原条目而不是追加第二条）。
+    const reportDiagnostic = (img: HTMLImageElement, diag: RenderDiagnostic): void => {
+      const src = diag.src ?? rawImgSrc(img);
+      if (!src) return;
+      const existing = diagByElement.get(img) ?? (seen.has(src) ? diagBySrc.get(src) : undefined);
+      if (existing) {
+        // 重建节点/重复上报:不重复入列,但必须把「最新 diag 对象引用」
+        // 写回两条索引——否则后续 load 查不到关联,banner 残留(_review M2)。
+        const at = aggregate.indexOf(existing);
+        if (at >= 0) aggregate[at] = diag;
+        // 旧 src 键（可能与重试后的新 src 不同）随旧条目一并退役。
+        if (existing.src && existing.src !== src) {
+          diagBySrc.delete(existing.src);
+          seen.delete(existing.src);
+        }
+        diagByElement.set(img, diag);
+        diagBySrc.set(src, diag);
+        seen.add(src);
+        // ISS-217：原实现 seen 分支替换后不 flush，升级消息要等下一次
+        // 事件才渲染；timeout→error 的升级正依赖此路径，补上立即 flush。
+        setImageDiagnostics([...aggregate]);
+        return;
+      }
+      seen.add(src);
+      aggregate.push(diag);
+      diagByElement.set(img, diag);
+      diagBySrc.set(src, diag);
+      setImageDiagnostics([...aggregate]);
+    };
+
+    // ISS-217：诊断携带原始 src attribute 而非解析后的 img.src 属性——
+    // 后者会把相对路径解析成绝对 URL（http://localhost/...），导致「仅远程
+    // 图片可重试」的判定失效，且与 retryRemoteImageByUrl 的 attribute 精确
+    // 匹配天然一致。
+    const rawImgSrc = (img: HTMLImageElement): string =>
+      img.getAttribute('src') ?? '';
 
     const classifyError = (img: HTMLImageElement, error: boolean): RenderDiagnostic | null => {
-      const src = img.currentSrc || img.src || '';
+      const src = rawImgSrc(img);
       if (!src) return null;
       // CSP 不再拦截 http: 图片（ISS-110 放开 img-src/media-src 的 http:），
       // http 图片失败只可能是 DNS/网络/404/解码，按 not-found/decode-failed 归类，
@@ -823,35 +894,20 @@ export function WysiwygEditorPane({ source, onChange, onViewComplexTable, filePa
           ? (code === 'not-found' ? '找不到图片' : '图片数据损坏')
           : '图片加载失败',
         language: img.alt ?? undefined,
+        src,
       };
     };
 
     const handleImgError = (event: Event): void => {
       const target = event.target as Element | null;
       if (!(target instanceof HTMLImageElement)) return;
-      const src = target.currentSrc || target.src || '';
+      const src = rawImgSrc(target);
       if (!src) return;
       // 同 src 重复 error 更新条目（不重复入列），保证 aggregate 单条且
       // 后续 load 可按 src 移除（重建节点/重复失败均覆盖）。
       const diag = classifyError(target, true);
       if (!diag) return;
-      if (seen.has(src)) {
-        // 重建节点/重复失败:不重复入列,但必须把「最新 diag 对象引用」
-        // 写回两条索引——否则后续 load 查不到关联,banner 残留(_review M2)。
-        const existing = diagBySrc.get(src);
-        if (existing) {
-          const at = aggregate.indexOf(existing);
-          if (at >= 0) aggregate[at] = diag;
-        }
-        diagByElement.set(target, diag);
-        diagBySrc.set(src, diag);
-        return;
-      }
-      seen.add(src);
-      aggregate.push(diag);
-      diagByElement.set(target, diag);
-      diagBySrc.set(src, diag);
-      setImageDiagnostics([...aggregate]);
+      reportDiagnostic(target, diag);
     };
 
     // ISS-208：与 error 对称的 load 监听——同一 src 后来加载成功
@@ -860,30 +916,54 @@ export function WysiwygEditorPane({ source, onChange, onViewComplexTable, filePa
     const handleImgLoad = (event: Event): void => {
       const target = event.target as Element | null;
       if (!(target instanceof HTMLImageElement)) return;
-      const src = target.currentSrc || target.src || '';
+      const src = rawImgSrc(target);
       if (!src) return;
       // 主查找:元素级(error 与 load 之间元素身份稳定,src 可能已从原始
       // 路径变为 data URL);兜底:src 级(重建节点的 src 命中旧错误)。
       const diag = diagByElement.get(target) ?? diagBySrc.get(src);
       if (!diag) return;
       diagByElement.delete(target);
+      // 清理条目自身的 src 键（重试后可能与 load 携带的 src 不同）+ 本次
+      // load 的 src 键兜底。
+      if (diag.src) {
+        diagBySrc.delete(diag.src);
+        seen.delete(diag.src);
+      }
       diagBySrc.delete(src);
-      diagBySrc.delete(src);
+      seen.delete(src);
       const index = aggregate.indexOf(diag);
       if (index >= 0) {
         aggregate.splice(index, 1);
         setImageDiagnostics([...aggregate]);
       }
-      seen.delete(src);
     };
+
+    // ISS-217：挂起看门狗。只对「进入过视口」（IntersectionObserver——
+    // lazy 视口外的图片不参与计时）且 !complete 的远程图片计时，30s 无
+    // 进展上报 timeout（文案软化：慢网大图也可能超时，load 到达时自动
+    // 清除；currentSrc 不能作开始信号——挂起中的请求其为空串，见服务
+    // 头注实证）。
+    const stopWatchdog = watchRemoteImages(host, {
+      onTimeout: (img) => {
+        const src = rawImgSrc(img);
+        if (!src) return;
+        reportDiagnostic(img, {
+          code: 'timeout',
+          message: '图片加载超时（网络较慢或图片源被阻断）',
+          language: img.alt ?? undefined,
+          src,
+        });
+      },
+    });
 
     host.addEventListener('error', handleImgError, true);
     host.addEventListener('load', handleImgLoad, true);
     return () => {
+      stopWatchdog();
       host.removeEventListener('error', handleImgError, true);
       host.removeEventListener('load', handleImgLoad, true);
     };
-  }, []);
+  }, [filePath, retryKey]);
 
   // ISS-187：Vditor 在初始化 / 外部 setValue 之外仍可能重建 IR 子树。
   // localImageResolver 写入的 asset URL 属于展示态 DOM；旧 <img> 被替换
@@ -911,6 +991,7 @@ export function WysiwygEditorPane({ source, onChange, onViewComplexTable, filePa
         resolveFrame = null;
         if (!host.isConnected) return;
         void resolveLocalImages(host, filePath);
+        applyLazyLoadingToRemoteImages(host);
       });
     });
     observer.observe(host, {
@@ -1102,7 +1183,10 @@ export function WysiwygEditorPane({ source, onChange, onViewComplexTable, filePa
               sanitizingRef.current = false;
               lockComplexTables();
               const host = hostRef.current;
-              if (host) void resolveLocalImages(host, filePath);
+              if (host) {
+                void resolveLocalImages(host, filePath);
+                applyLazyLoadingToRemoteImages(host);
+              }
               if (sanitized.sourceChanged) emitEditorValueIfChanged(editor);
             } catch (error) {
               sanitizingRef.current = false;
@@ -1142,7 +1226,10 @@ export function WysiwygEditorPane({ source, onChange, onViewComplexTable, filePa
                   sanitizingRef.current = false;
                   lockComplexTables();
                   const host = hostRef.current;
-                  if (host) void resolveLocalImages(host, filePath);
+                  if (host) {
+                    void resolveLocalImages(host, filePath);
+                    applyLazyLoadingToRemoteImages(host);
+                  }
                   if (sanitized.sourceChanged) emitEditorValueIfChanged(editor);
                 } catch (error) {
                   sanitizingRef.current = false;
@@ -1211,7 +1298,10 @@ export function WysiwygEditorPane({ source, onChange, onViewComplexTable, filePa
           // 仅在编辑器仍有焦点时调用，避免外部 setValue 路径误触发。
           const irEl = editorRef.current?.vditor.ir?.element;
           const host = irEl?.parentElement ?? null;
-          if (host) void resolveLocalImages(host, filePath);
+          if (host) {
+            void resolveLocalImages(host, filePath);
+            applyLazyLoadingToRemoteImages(host);
+          }
           // ISS-69：仅在 securityChanged 时才用 editor.getValue() 覆盖
           // callback 参数 `value`。仅 sourceChanged（marker 源码被清洗，
           // 但用户实际 DOM 已反映删除）时直接采用 callback value，避免
@@ -1390,7 +1480,10 @@ export function WysiwygEditorPane({ source, onChange, onViewComplexTable, filePa
         // 再解析一次本地相对资源，否则含 SVG sanitize / 会话同步等触发
         // 外部更新后，../../figures/... 图片只剩替代文字。
         const host = hostRef.current;
-        if (host) void resolveLocalImages(host, filePath);
+        if (host) {
+          void resolveLocalImages(host, filePath);
+          applyLazyLoadingToRemoteImages(host);
+        }
         if (sanitized.sourceChanged) emitEditorValueIfChanged(editor);
       } catch (error) {
         sanitizingRef.current = false;
@@ -1492,6 +1585,28 @@ export function WysiwygEditorPane({ source, onChange, onViewComplexTable, filePa
     return attachCodeBlockCopy(host, overlay, codeCopyLabels);
   }, [codeCopyLabels]);
 
+  // ISS-217：banner 重试——同元素改写为唯一 URL 强制重新请求（无 query
+  // 时 ?folioRetry=N；带 query 走 remove→RAF 恢复，见服务实现）。
+  // 匹配 0 个元素（图片已删除 / 文档已切换）时把该条诊断视为已解决并
+  // 移除，避免死按钮。批量重试 = 对全部可重试 src 去重后逐个执行。
+  const retryImageDiagnosticBySrc = useCallback((src: string) => {
+    const host = hostRef.current;
+    if (!host) return;
+    if (retryRemoteImageByUrl(host, src) === 0) {
+      setImageDiagnostics((prev) => prev.filter((d) => d.src !== src));
+    }
+  }, []);
+
+  const retryAllImageDiagnostics = useCallback(() => {
+    const host = hostRef.current;
+    if (!host) return;
+    const targets = Array.from(
+      new Set(imageDiagnostics.filter(isRetryableImageDiagnostic).map((d) => d.src!)),
+    );
+    const resolved = new Set(targets.filter((src) => retryRemoteImageByUrl(host, src) === 0));
+    setImageDiagnostics((prev) => prev.filter((d) => !resolved.has(d.src ?? '')));
+  }, [imageDiagnostics]);
+
   // 错误状态：显示可见的错误信息和重试按钮
   if (phase === 'error') {
     return (
@@ -1514,7 +1629,7 @@ export function WysiwygEditorPane({ source, onChange, onViewComplexTable, filePa
     <div className="wysiwyg-editor-pane" aria-label={t('editorAriaLabel')}>
       {imageDiagnostics.length > 0 && (
         <div className="wysiwyg-editor-diagnostics" data-testid="wysiwyg-editor-diagnostics">
-          {imageDiagnostics.map((d, i) => (
+          {imageDiagnostics.slice(0, MAX_VISIBLE_IMAGE_DIAGNOSTICS).map((d, i) => (
             <MediaPlaceholder
               key={`${d.code}-${d.message}-${i}`}
               code={d.code}
@@ -1522,8 +1637,24 @@ export function WysiwygEditorPane({ source, onChange, onViewComplexTable, filePa
               lang={d.language}
               details={{ ...d, surface: 'editor' }}
               surface="editor"
+              onRetry={isRetryableImageDiagnostic(d) ? () => retryImageDiagnosticBySrc(d.src!) : undefined}
             />
           ))}
+          {imageDiagnostics.length > MAX_VISIBLE_IMAGE_DIAGNOSTICS && (
+            <MediaPlaceholder
+              key="image-diagnostics-summary"
+              code="timeout"
+              message={`还有 ${imageDiagnostics.length - MAX_VISIBLE_IMAGE_DIAGNOSTICS} 张图片仍在加载或已超时`}
+              details={{
+                code: 'timeout',
+                message: 'summary',
+                surface: 'editor',
+                hidden: imageDiagnostics.slice(MAX_VISIBLE_IMAGE_DIAGNOSTICS),
+              }}
+              surface="editor"
+              onRetry={retryAllImageDiagnostics}
+            />
+          )}
         </div>
       )}
       <div ref={hostRef} className="wysiwyg-editor-host" />
