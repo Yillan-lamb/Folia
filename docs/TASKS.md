@@ -34,7 +34,7 @@
 
 ### 缺陷类
 
-#### 🔲 ISS-217 远程图片在弱网/系统代理黑洞下静默挂起——无反馈、不自愈、无重试（已实现 + 真机验证，待 PR review）
+#### ✅ ISS-217 远程图片在弱网/系统代理黑洞下静默挂起——无反馈、不自愈、无重试（已 PR #168，2026-09-14 squash merge 93655a4；对抗式 review 一轮 REQUEST_CHANGES→修复 I1/I2→复核 APPROVE〔reviewer 独立 worktree 复跑 51/51 + 红绿判别验证〕；CI 三绿后合并；残余 Minor：R2 快速双击 30s 窗口内条目瞬时消失〔自愈〕可加前缀守卫、R4 服务层二报 src 断言——登记跟进不阻塞）
 
 - **发现（用户报告 + 真机取证）**：打开含 43 张腾讯云 COS webp 的 139KB 长文（养虾日记 Vol21）时图片全部不显示，IR 区呈现原始 markdown 语法。用户观察「超长文档易出现」。
 - **根因（已实锤，非 folia 渲染 bug）**：用户系统代理 PacketTun（127.0.0.1:1082，HTTP+HTTPS 系统代理）当时对 `cos.ap-shanghai.myqcloud.com` 转发黑洞。WKWebView 遵守系统代理 → 全部图片请求挂起 60s+ 后逐个失败（约每 10s 一张 trickle error）；终端 curl 不走系统代理故直连 0.4s 秒通，造成「链接有效但软件不显示」的假象。对照证据：`curl -x 127.0.0.1:1082` = HTTP 000 超时；直连 = 200。CSP(img-src https:)/ATS/localImageResolver(https 跳过)/sanitize(DOMPurify 保留 img) 四层静态全排除。
@@ -43,7 +43,7 @@
   - `WysiwygEditorPane.tsx`：诊断记账收敛到共享 `reportDiagnostic`（timeout↔error 同路径升级替换、修 ISS-208 遗留 seen 分支不 flush 缺陷）、banner 截断 3 条 + 「还有 N 张」汇总行 + 批量重试、`MediaPlaceholder.onRetry` 首次接线、诊断 effect deps 收紧 `[filePath, retryKey]`（修跨文档陈旧诊断）。
   - **实现期实证修正（Playwright 探针，Chromium 131）**：① 挂起中的请求 `img.currentSrc` 为空串（eager/lazy 皆然，响应到达才设置）——看门狗「已开始加载」判定不能用 currentSrc，改用 IntersectionObserver；② 同 URL 的任何重启方式（新元素/克隆/属性重设）都被浏览器按 URL 去重到挂起中的在途请求上永不重发——唯一确定的重启是让 URL 唯一（`?folioRetry=N`）。
 - **验证**：815/815 单测（T1-T11 全 TDD 先红后绿）+ typecheck/lint 零错 + 新增 e2e `remote-image-watchdog.spec.ts` 全链路（counter-route 黑洞→timeout 占位→重试放行→加载成功→条目清除→源码 round-trip 零污染，43s）+ 真机 WKWebView（30s 内占位出现截图 A、挂起中重试不崩溃不整页 reload 截图 B、Cmd+S 落盘字节零污染）。e2e 回归：resource-failure-matrix 4/5 过（illegal-mermaid 在 main 同挂，pre-existing）；wysiwyg-bold-marker 5/5 main 同挂（pre-existing，已记入本地 e2e 预存失败清单）。
-- **遗留**：PR review + merge（用户工作流：仓库 37 worktree 协作）；真机「代理恢复→批量重试→全图恢复」场景因代理状态漂移未能当场完整复现，重试链路正确性由 e2e counter-route 确定性覆盖。
+- **review 轮次（2026-09-14）**：I1 持续黑洞二次重试静默删条目+看门狗死亡〔修法 armedSrc 重置 + unobserve→re-observe 依赖 IO 初始回调，e2e/真机双击实证〕、I2 round-trip 补 folioRetry= 泄漏守卫、M1-M3 清理。R1（WKWebView re-observe）真机双击重试验证条目存活关闭。**教训**：本地 lint 验证曾漏检 prefer-const（CI 兜住）——lint 结论须看到退出码/输出末行，不能凭 tail 空行推断。
 
 #### ✅ ISS-197 fs 插件 deny-only scope + write_managed_asset 强制约束（已 PR #135，2026-08-29 squash merge 5c97cd1；对抗式 review 设计确认正确、0 阻塞；LOW 加固项并入 ISS-201、deny 大小写真机验证移交 NOT_VERIFIED）
 
