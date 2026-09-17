@@ -36,7 +36,7 @@
 
 > ⚠️ **2026-08-14 数据恢复说明**：本文件 DEC-065 ~ DEC-137 正文因一次 `git stash pop` 误操作覆盖丢失（local 文件，git 无历史备份）。以下已从 CHANGELOG.md（权威变更记录）重建决策骨架——编号/ISS/PR/版本/结论可追溯，但部分早期条目（v0.3.10~v0.4.3，CHANGELOG 未逐条标 DEC 号）按版本聚合；完整根因分析详见 CHANGELOG 对应版本段与 PR。代码无损失（全部已合并）。排列沿用本文件既有降序惯例（新决策在前），与 DEC-064→DEC-001 衔接。
 
-### [DEC-143] - 2026-09-17 - 文件 watcher 以 stat 指纹分流 Modify 事件：iCloud 卸载 / metadata-only 变化不触发自动重读；云占位空读不覆盖编辑器（ISS-218）
+### [DEC-143] - 2026-09-17 - 文件 watcher 以 stat 指纹分流 Modify 事件：iCloud 卸载 / metadata-only 变化不触发自动重读；云占位空读不覆盖编辑器（ISS-218，PR #169）
 
 **背景**：用户报告在 iCloud 同步目录打开的 md 离开一段时间后 Folia 页面空白。取证发现根因不在渲染层：iCloud「优化 Mac 存储」把文件卸载为按需下载占位时，notify 上报的事件（`Modify(Metadata(Extended)) + Modify(Data(Content))`）与真实写入在事件层不可区分，ISS-188 自动重读照单执行——有网把文件强拉回本地并连锁多次重读；弱网 / 中间态读回空文档静默覆盖编辑器，再经 session 持久化固化、autosave 写回磁盘，形成数据丢失链。
 
